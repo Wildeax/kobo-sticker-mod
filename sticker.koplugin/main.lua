@@ -6,13 +6,14 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Screen = require("device").screen
 local logger = require("logger")
-local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
+
+local StickerStore = require("stickerstore")
 
 local PageSticker = WidgetContainer:extend{
     name = "sticker",
     is_doc_only = true,
-    stickers = nil,         -- per-page sticker data: { [pageno] = { {x, y, w, h, img}, ... } }
+    store = nil,            -- StickerStore instance
     sticker_cache = nil,    -- cached BlitBuffers keyed by path|w|h
     current_page = nil,
     is_placing = false,
@@ -37,7 +38,7 @@ function PageSticker:onDispatcherRegisterActions()
 end
 
 function PageSticker:init()
-    self.stickers = {}
+    self.store = StickerStore:new()
     self.sticker_cache = {}
     self.sticker_size = math.floor(Screen:getWidth() * 0.12)
     self:onDispatcherRegisterActions()
@@ -49,7 +50,8 @@ function PageSticker:onReaderReady()
 end
 
 function PageSticker:onReadSettings(config)
-    self.stickers = config:readSetting("sticker_data") or {}
+    local data = config:readSetting("sticker_data")
+    self.store:deserialize(data)
     self.is_visible = config:readSetting("sticker_visible")
     if self.is_visible == nil then
         self.is_visible = true
@@ -57,7 +59,7 @@ function PageSticker:onReadSettings(config)
 end
 
 function PageSticker:onSaveSettings()
-    self.ui.doc_settings:saveSetting("sticker_data", self.stickers)
+    self.ui.doc_settings:saveSetting("sticker_data", self.store:serialize())
     self.ui.doc_settings:saveSetting("sticker_visible", self.is_visible)
 end
 
@@ -82,47 +84,22 @@ end
 --- Paint all stickers for the current page onto the screen buffer.
 function PageSticker:paintTo(bb, x, y)
     if not self.is_visible or not self.current_page then return end
-    local page_stickers = self.stickers[self.current_page]
-    if not page_stickers then return end
+    local page_stickers = self.store:getStickersForPage(self.current_page)
+    if #page_stickers == 0 then return end
 
     for _, s in ipairs(page_stickers) do
         local sticker_bb = self:getStickerBB(s.img, s.w, s.h)
         if sticker_bb then
             local dest_x = x + s.x
             local dest_y = y + s.y
-            -- Use alpha blending for PNG transparency support
             bb:alphablitFrom(sticker_bb, dest_x, dest_y, 0, 0, s.w, s.h)
         end
     end
 end
 
---- Scan the stickers directory and return a list of available sticker paths.
-function PageSticker:getAvailableStickers()
-    local sticker_dir = self.path .. "/stickers"
-    local stickers = {}
-    local ok, iter, dir_obj = pcall(lfs.dir, sticker_dir)
-    if not ok then
-        logger.warn("Sticker: cannot read stickers directory:", sticker_dir)
-        return stickers
-    end
-    for entry in iter, dir_obj do
-        if entry ~= "." and entry ~= ".." then
-            local ext = entry:lower():match("%.(%w+)$")
-            if ext == "png" or ext == "jpg" or ext == "jpeg" or ext == "webp" then
-                table.insert(stickers, {
-                    path = sticker_dir .. "/" .. entry,
-                    name = entry:match("^(.+)%..+$") or entry,
-                })
-            end
-        end
-    end
-    table.sort(stickers, function(a, b) return a.name < b.name end)
-    return stickers
-end
-
 --- Show a menu to pick which sticker to place, then enter placement mode.
 function PageSticker:onStickerStartPlacement()
-    local available = self:getAvailableStickers()
+    local available = StickerStore.scanDirectory(self.path .. "/stickers")
     if #available == 0 then
         UIManager:show(InfoMessage:new{
             text = _("No stickers found.\n\nAdd PNG or JPG images to:\nsticker.koplugin/stickers/"),
@@ -189,19 +166,10 @@ function PageSticker:placeSticker(tap_x, tap_y)
 
     local w = self.sticker_size
     local h = self.sticker_size
+    local cx = tap_x - math.floor(w / 2)
+    local cy = tap_y - math.floor(h / 2)
 
-    local sticker = {
-        x = tap_x - math.floor(w / 2),
-        y = tap_y - math.floor(h / 2),
-        w = w,
-        h = h,
-        img = self.selected_sticker,
-    }
-
-    if not self.stickers[self.current_page] then
-        self.stickers[self.current_page] = {}
-    end
-    table.insert(self.stickers[self.current_page], sticker)
+    self.store:addSticker(self.current_page, cx, cy, w, h, self.selected_sticker)
 
     UIManager:setDirty(self.view, "ui")
     logger.dbg("Sticker: placed on page", self.current_page, "at", tap_x, tap_y)
@@ -238,11 +206,8 @@ function PageSticker:addToMainMenu(menu_items)
             {
                 text = _("Undo last sticker on this page"),
                 callback = function()
-                    if self.current_page and self.stickers[self.current_page] then
-                        table.remove(self.stickers[self.current_page])
-                        if #self.stickers[self.current_page] == 0 then
-                            self.stickers[self.current_page] = nil
-                        end
+                    if self.current_page then
+                        self.store:removeLastSticker(self.current_page)
                         UIManager:setDirty(self.view, "ui")
                     end
                 end,
@@ -251,7 +216,7 @@ function PageSticker:addToMainMenu(menu_items)
                 text = _("Clear stickers on this page"),
                 callback = function()
                     if self.current_page then
-                        self.stickers[self.current_page] = nil
+                        self.store:clearPage(self.current_page)
                         UIManager:setDirty(self.view, "ui")
                     end
                 end,
@@ -264,7 +229,7 @@ function PageSticker:addToMainMenu(menu_items)
                         text = _("Remove all stickers from this book?"),
                         ok_text = _("Clear all"),
                         ok_callback = function()
-                            self.stickers = {}
+                            self.store:clearAll()
                             UIManager:setDirty(self.view, "ui")
                         end,
                     })
