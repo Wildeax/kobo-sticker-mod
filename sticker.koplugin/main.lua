@@ -40,19 +40,23 @@ function PageSticker:onDispatcherRegisterActions()
 end
 
 function PageSticker:init()
+    logger.dbg("Sticker: init() called")
     self.store = StickerStore:new()
     self.sticker_cache = {}
     self.current_size_preset = "medium"
     self.current_rotation = 0
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
+    logger.dbg("Sticker: init() complete, screen width:", Screen:getWidth())
 end
 
 function PageSticker:onReaderReady()
+    logger.dbg("Sticker: onReaderReady(), registering view module")
     self.view:registerViewModule("sticker", self)
 end
 
 function PageSticker:onReadSettings(config)
+    logger.dbg("Sticker: onReadSettings()")
     local data = config:readSetting("sticker_data")
     self.store:deserialize(data)
     self.is_visible = config:readSetting("sticker_visible")
@@ -61,9 +65,14 @@ function PageSticker:onReadSettings(config)
     end
     self.current_size_preset = config:readSetting("sticker_size_preset") or "medium"
     self.current_rotation = config:readSetting("sticker_rotation") or 0
+    logger.dbg("Sticker: loaded", self.store:getTotalCount(), "stickers,",
+               "visible:", self.is_visible,
+               "size:", self.current_size_preset,
+               "rotation:", self.current_rotation)
 end
 
 function PageSticker:onSaveSettings()
+    logger.dbg("Sticker: onSaveSettings(),", self.store:getTotalCount(), "stickers")
     self.ui.doc_settings:saveSetting("sticker_data", self.store:serialize())
     self.ui.doc_settings:saveSetting("sticker_visible", self.is_visible)
     self.ui.doc_settings:saveSetting("sticker_size_preset", self.current_size_preset)
@@ -85,6 +94,7 @@ function PageSticker:getStickerBB(img_path, w, h, rotation)
     rotation = rotation or 0
     local key = img_path .. "|" .. tostring(w) .. "|" .. tostring(h) .. "|" .. tostring(rotation)
     if not self.sticker_cache[key] then
+        logger.dbg("Sticker: loading image:", img_path, "size:", w, "x", h, "rotation:", rotation)
         local bb = RenderImage:renderImageFile(img_path, false, w, h)
         if bb then
             if rotation ~= 0 and bb.rotatedCopy then
@@ -93,8 +103,9 @@ function PageSticker:getStickerBB(img_path, w, h, rotation)
                 bb = rotated
             end
             self.sticker_cache[key] = bb
+            logger.dbg("Sticker: image loaded and cached:", img_path)
         else
-            logger.warn("Sticker: failed to load image:", img_path)
+            logger.warn("Sticker: FAILED to load image:", img_path)
         end
     end
     return self.sticker_cache[key]
@@ -118,7 +129,9 @@ end
 
 --- Show a menu to pick which sticker to place, then enter placement mode.
 function PageSticker:onStickerStartPlacement()
+    logger.dbg("Sticker: scanning stickers directory:", self.path .. "/stickers")
     local available = StickerStore.scanDirectory(self.path .. "/stickers")
+    logger.dbg("Sticker: found", #available, "sticker images")
     if #available == 0 then
         UIManager:show(InfoMessage:new{
             text = _("No stickers found.\n\nAdd PNG or JPG images to:\nsticker.koplugin/stickers/"),
@@ -128,10 +141,12 @@ function PageSticker:onStickerStartPlacement()
 
     local buttons = {}
     for _, s in ipairs(available) do
+        logger.dbg("Sticker: available:", s.name, "->", s.path)
         table.insert(buttons, {{
             text = s.name,
             callback = function()
                 self.selected_sticker = s.path
+                logger.dbg("Sticker: selected:", s.name)
                 self:enterPlacementMode()
                 UIManager:close(self._picker)
             end,
@@ -153,6 +168,7 @@ function PageSticker:enterPlacementMode()
     self.is_placing = true
     local size_label = self.current_size_preset
     local rot_label = self.current_rotation .. "°"
+    logger.dbg("Sticker: entering placement mode, size:", size_label, "rotation:", rot_label)
     UIManager:show(InfoMessage:new{
         text = _("Tap to place sticker.") .. "\n" ..
                _("Size: ") .. size_label .. " | " .. _("Rotation: ") .. rot_label,
@@ -184,7 +200,11 @@ end
 
 --- Place the selected sticker centered on the tap coordinates.
 function PageSticker:placeSticker(tap_x, tap_y)
-    if not self.current_page or not self.selected_sticker then return end
+    if not self.current_page or not self.selected_sticker then
+        logger.warn("Sticker: placeSticker() called but no page or sticker selected",
+                     "page:", self.current_page, "sticker:", self.selected_sticker)
+        return
+    end
 
     local size = self:getCurrentStickerSize()
     local cx = tap_x - math.floor(size / 2)
@@ -194,8 +214,11 @@ function PageSticker:placeSticker(tap_x, tap_y)
                           self.selected_sticker, self.current_rotation)
 
     UIManager:setDirty(self.view, "ui")
-    logger.dbg("Sticker: placed on page", self.current_page, "at", tap_x, tap_y,
-               "size:", size, "rotation:", self.current_rotation)
+    logger.dbg("Sticker: placed on page", self.current_page,
+               "at", tap_x, ",", tap_y,
+               "-> offset", cx, ",", cy,
+               "size:", size, "rotation:", self.current_rotation,
+               "total on page:", self.store:getCountForPage(self.current_page))
 end
 
 function PageSticker:onStickerToggleVisibility()
@@ -205,6 +228,7 @@ function PageSticker:onStickerToggleVisibility()
         text = self.is_visible and _("Stickers visible.") or _("Stickers hidden."),
         timeout = 1,
     })
+    logger.dbg("Sticker: visibility toggled to", self.is_visible)
     return true
 end
 
@@ -224,6 +248,7 @@ function PageSticker:buildSizeMenuItems()
             checked_func = function() return self.current_size_preset == preset end,
             callback = function()
                 self.current_size_preset = preset
+                logger.dbg("Sticker: size preset changed to", preset)
             end,
         })
     end
@@ -246,6 +271,7 @@ function PageSticker:buildRotationMenuItems()
             checked_func = function() return self.current_rotation == angle end,
             callback = function()
                 self.current_rotation = angle
+                logger.dbg("Sticker: rotation changed to", angle)
             end,
         })
     end
@@ -288,6 +314,8 @@ function PageSticker:addToMainMenu(menu_items)
                     if self.current_page then
                         self.store:removeLastSticker(self.current_page)
                         UIManager:setDirty(self.view, "ui")
+                        logger.dbg("Sticker: undo on page", self.current_page,
+                                   "remaining:", self.store:getCountForPage(self.current_page))
                     end
                 end,
             },
@@ -295,8 +323,9 @@ function PageSticker:addToMainMenu(menu_items)
                 text = _("Clear stickers on this page"),
                 callback = function()
                     if self.current_page then
-                        self.store:clearPage(self.current_page)
+                        local count = self.store:clearPage(self.current_page)
                         UIManager:setDirty(self.view, "ui")
+                        logger.dbg("Sticker: cleared", count, "stickers from page", self.current_page)
                     end
                 end,
             },
@@ -308,8 +337,9 @@ function PageSticker:addToMainMenu(menu_items)
                         text = _("Remove all stickers from this book?"),
                         ok_text = _("Clear all"),
                         ok_callback = function()
-                            self.store:clearAll()
+                            local count = self.store:clearAll()
                             UIManager:setDirty(self.view, "ui")
+                            logger.dbg("Sticker: cleared all", count, "stickers from book")
                         end,
                     })
                 end,
@@ -319,12 +349,15 @@ function PageSticker:addToMainMenu(menu_items)
 end
 
 function PageSticker:onCloseWidget()
+    local count = 0
     for _, bb in pairs(self.sticker_cache) do
         if bb and bb.free then
             bb:free()
+            count = count + 1
         end
     end
     self.sticker_cache = {}
+    logger.dbg("Sticker: onCloseWidget(), freed", count, "cached images")
 end
 
 return PageSticker
