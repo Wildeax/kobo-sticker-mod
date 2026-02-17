@@ -4,9 +4,20 @@
 local StickerStore = {}
 StickerStore.__index = StickerStore
 
+-- Size presets as fraction of screen width.
+StickerStore.SIZE_PRESETS = {
+    small  = 0.08,  -- ~100px on Libra Color
+    medium = 0.12,  -- ~151px (default)
+    large  = 0.18,  -- ~227px
+    xlarge = 0.25,  -- ~316px
+}
+
+-- Valid rotation angles.
+StickerStore.VALID_ROTATIONS = { [0] = true, [90] = true, [180] = true, [270] = true }
+
 function StickerStore:new()
     local o = setmetatable({}, self)
-    o.pages = {}  -- { [page_number] = { {x, y, w, h, img}, ... } }
+    o.pages = {}  -- { [page_number] = { {x, y, w, h, img, rotation}, ... } }
     return o
 end
 
@@ -17,12 +28,17 @@ end
 -- @param w number Width in pixels
 -- @param h number Height in pixels
 -- @param img string Path to sticker image file
-function StickerStore:addSticker(page, x, y, w, h, img)
+-- @param rotation number Rotation in degrees (0, 90, 180, 270). Default 0.
+function StickerStore:addSticker(page, x, y, w, h, img, rotation)
     if not page or not x or not y or not w or not h or not img then
         return false, "missing required fields"
     end
     if type(page) ~= "number" or page < 1 then
         return false, "invalid page number"
+    end
+    rotation = rotation or 0
+    if not self.VALID_ROTATIONS[rotation] then
+        return false, "invalid rotation (must be 0, 90, 180, or 270)"
     end
     if not self.pages[page] then
         self.pages[page] = {}
@@ -33,8 +49,19 @@ function StickerStore:addSticker(page, x, y, w, h, img)
         w = w,
         h = h,
         img = img,
+        rotation = rotation,
     })
     return true
+end
+
+--- Compute sticker pixel size from a preset name and screen width.
+-- @param preset string Preset name ("small", "medium", "large", "xlarge")
+-- @param screen_width number Screen width in pixels
+-- @return number Size in pixels, or nil if preset is invalid
+function StickerStore.sizeFromPreset(preset, screen_width)
+    local ratio = StickerStore.SIZE_PRESETS[preset]
+    if not ratio then return nil end
+    return math.floor(screen_width * ratio)
 end
 
 --- Remove the last sticker placed on a page (undo).

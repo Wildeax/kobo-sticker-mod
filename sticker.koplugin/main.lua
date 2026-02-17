@@ -14,12 +14,14 @@ local PageSticker = WidgetContainer:extend{
     name = "sticker",
     is_doc_only = true,
     store = nil,            -- StickerStore instance
-    sticker_cache = nil,    -- cached BlitBuffers keyed by path|w|h
+    sticker_cache = nil,    -- cached BlitBuffers keyed by path|w|h|rotation
     current_page = nil,
     is_placing = false,
     is_visible = true,
     selected_sticker = nil, -- path to the sticker image to place
-    sticker_size = nil,     -- size in pixels (computed from screen width)
+    -- Pre-placement settings (persist across placements within a session)
+    current_size_preset = "medium",
+    current_rotation = 0,
 }
 
 function PageSticker:onDispatcherRegisterActions()
@@ -40,7 +42,8 @@ end
 function PageSticker:init()
     self.store = StickerStore:new()
     self.sticker_cache = {}
-    self.sticker_size = math.floor(Screen:getWidth() * 0.12)
+    self.current_size_preset = "medium"
+    self.current_rotation = 0
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
 end
@@ -56,23 +59,39 @@ function PageSticker:onReadSettings(config)
     if self.is_visible == nil then
         self.is_visible = true
     end
+    self.current_size_preset = config:readSetting("sticker_size_preset") or "medium"
+    self.current_rotation = config:readSetting("sticker_rotation") or 0
 end
 
 function PageSticker:onSaveSettings()
     self.ui.doc_settings:saveSetting("sticker_data", self.store:serialize())
     self.ui.doc_settings:saveSetting("sticker_visible", self.is_visible)
+    self.ui.doc_settings:saveSetting("sticker_size_preset", self.current_size_preset)
+    self.ui.doc_settings:saveSetting("sticker_rotation", self.current_rotation)
 end
 
 function PageSticker:onPageUpdate(pageno)
     self.current_page = pageno
 end
 
+--- Get the current sticker size in pixels.
+function PageSticker:getCurrentStickerSize()
+    return StickerStore.sizeFromPreset(self.current_size_preset, Screen:getWidth())
+        or StickerStore.sizeFromPreset("medium", Screen:getWidth())
+end
+
 --- Load and cache a sticker image as a BlitBuffer.
-function PageSticker:getStickerBB(img_path, w, h)
-    local key = img_path .. "|" .. tostring(w) .. "|" .. tostring(h)
+function PageSticker:getStickerBB(img_path, w, h, rotation)
+    rotation = rotation or 0
+    local key = img_path .. "|" .. tostring(w) .. "|" .. tostring(h) .. "|" .. tostring(rotation)
     if not self.sticker_cache[key] then
         local bb = RenderImage:renderImageFile(img_path, false, w, h)
         if bb then
+            if rotation ~= 0 and bb.rotatedCopy then
+                local rotated = bb:rotatedCopy(rotation)
+                bb:free()
+                bb = rotated
+            end
             self.sticker_cache[key] = bb
         else
             logger.warn("Sticker: failed to load image:", img_path)
@@ -88,7 +107,7 @@ function PageSticker:paintTo(bb, x, y)
     if #page_stickers == 0 then return end
 
     for _, s in ipairs(page_stickers) do
-        local sticker_bb = self:getStickerBB(s.img, s.w, s.h)
+        local sticker_bb = self:getStickerBB(s.img, s.w, s.h, s.rotation)
         if sticker_bb then
             local dest_x = x + s.x
             local dest_y = y + s.y
@@ -132,8 +151,11 @@ end
 --- Enter placement mode: the next tap on the page places the selected sticker.
 function PageSticker:enterPlacementMode()
     self.is_placing = true
+    local size_label = self.current_size_preset
+    local rot_label = self.current_rotation .. "°"
     UIManager:show(InfoMessage:new{
-        text = _("Tap anywhere on the page to place the sticker."),
+        text = _("Tap to place sticker.") .. "\n" ..
+               _("Size: ") .. size_label .. " | " .. _("Rotation: ") .. rot_label,
         timeout = 2,
     })
     self.ui:registerTouchZones({
@@ -164,15 +186,16 @@ end
 function PageSticker:placeSticker(tap_x, tap_y)
     if not self.current_page or not self.selected_sticker then return end
 
-    local w = self.sticker_size
-    local h = self.sticker_size
-    local cx = tap_x - math.floor(w / 2)
-    local cy = tap_y - math.floor(h / 2)
+    local size = self:getCurrentStickerSize()
+    local cx = tap_x - math.floor(size / 2)
+    local cy = tap_y - math.floor(size / 2)
 
-    self.store:addSticker(self.current_page, cx, cy, w, h, self.selected_sticker)
+    self.store:addSticker(self.current_page, cx, cy, size, size,
+                          self.selected_sticker, self.current_rotation)
 
     UIManager:setDirty(self.view, "ui")
-    logger.dbg("Sticker: placed on page", self.current_page, "at", tap_x, tap_y)
+    logger.dbg("Sticker: placed on page", self.current_page, "at", tap_x, tap_y,
+               "size:", size, "rotation:", self.current_rotation)
 end
 
 function PageSticker:onStickerToggleVisibility()
@@ -185,6 +208,50 @@ function PageSticker:onStickerToggleVisibility()
     return true
 end
 
+--- Build size sub-menu items.
+function PageSticker:buildSizeMenuItems()
+    local items = {}
+    local presets = { "small", "medium", "large", "xlarge" }
+    local labels = {
+        small  = _("Small (~100px)"),
+        medium = _("Medium (~150px)"),
+        large  = _("Large (~230px)"),
+        xlarge = _("Extra large (~316px)"),
+    }
+    for _, preset in ipairs(presets) do
+        table.insert(items, {
+            text = labels[preset],
+            checked_func = function() return self.current_size_preset == preset end,
+            callback = function()
+                self.current_size_preset = preset
+            end,
+        })
+    end
+    return items
+end
+
+--- Build rotation sub-menu items.
+function PageSticker:buildRotationMenuItems()
+    local items = {}
+    local angles = { 0, 90, 180, 270 }
+    local labels = {
+        [0]   = _("0° (no rotation)"),
+        [90]  = _("90° clockwise"),
+        [180] = _("180° (upside down)"),
+        [270] = _("270° clockwise"),
+    }
+    for _, angle in ipairs(angles) do
+        table.insert(items, {
+            text = labels[angle],
+            checked_func = function() return self.current_rotation == angle end,
+            callback = function()
+                self.current_rotation = angle
+            end,
+        })
+    end
+    return items
+end
+
 function PageSticker:addToMainMenu(menu_items)
     menu_items.sticker = {
         text = _("Page Stickers"),
@@ -194,6 +261,18 @@ function PageSticker:addToMainMenu(menu_items)
                 text = _("Place sticker"),
                 callback = function()
                     self:onStickerStartPlacement()
+                end,
+            },
+            {
+                text = _("Sticker size"),
+                sub_item_table_func = function()
+                    return self:buildSizeMenuItems()
+                end,
+            },
+            {
+                text = _("Sticker rotation"),
+                sub_item_table_func = function()
+                    return self:buildRotationMenuItems()
                 end,
             },
             {

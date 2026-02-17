@@ -72,6 +72,91 @@ describe("StickerStore", function()
             ok, err = store:addSticker("abc", 10, 20, 50, 50, "/img/a.png")
             eq(false, ok)
         end)
+
+        it("should store rotation when provided", function()
+            local store = StickerStore:new()
+            store:addSticker(1, 10, 20, 50, 50, "/img/a.png", 90)
+
+            local s = store:getStickersForPage(1)
+            eq(90, s[1].rotation)
+        end)
+
+        it("should default rotation to 0", function()
+            local store = StickerStore:new()
+            store:addSticker(1, 10, 20, 50, 50, "/img/a.png")
+
+            local s = store:getStickersForPage(1)
+            eq(0, s[1].rotation)
+        end)
+
+        it("should accept all valid rotations (0, 90, 180, 270)", function()
+            local store = StickerStore:new()
+            for _, r in ipairs({0, 90, 180, 270}) do
+                local ok = store:addSticker(1, 10, 20, 50, 50, "/img/a.png", r)
+                is_true(ok, "rotation " .. r .. " should be accepted")
+            end
+            tbl_len(store:getStickersForPage(1), 4)
+        end)
+
+        it("should reject invalid rotation values", function()
+            local store = StickerStore:new()
+            local ok, err = store:addSticker(1, 10, 20, 50, 50, "/img/a.png", 45)
+            eq(false, ok)
+
+            ok, err = store:addSticker(1, 10, 20, 50, 50, "/img/a.png", -90)
+            eq(false, ok)
+
+            ok, err = store:addSticker(1, 10, 20, 50, 50, "/img/a.png", 360)
+            eq(false, ok)
+        end)
+    end)
+
+    -- ─── Size presets ───
+
+    describe("sizeFromPreset", function()
+        it("should compute size for all presets", function()
+            local screen_w = 1264  -- Kobo Libra Color
+            is_not_nil(StickerStore.sizeFromPreset("small", screen_w))
+            is_not_nil(StickerStore.sizeFromPreset("medium", screen_w))
+            is_not_nil(StickerStore.sizeFromPreset("large", screen_w))
+            is_not_nil(StickerStore.sizeFromPreset("xlarge", screen_w))
+        end)
+
+        it("should return correct pixel values", function()
+            eq(math.floor(1264 * 0.08), StickerStore.sizeFromPreset("small", 1264))
+            eq(math.floor(1264 * 0.12), StickerStore.sizeFromPreset("medium", 1264))
+            eq(math.floor(1264 * 0.18), StickerStore.sizeFromPreset("large", 1264))
+            eq(math.floor(1264 * 0.25), StickerStore.sizeFromPreset("xlarge", 1264))
+        end)
+
+        it("should return nil for invalid preset", function()
+            is_nil(StickerStore.sizeFromPreset("huge", 1264))
+            is_nil(StickerStore.sizeFromPreset("", 1264))
+        end)
+
+        it("should scale with different screen widths", function()
+            local small_screen = StickerStore.sizeFromPreset("medium", 600)
+            local big_screen = StickerStore.sizeFromPreset("medium", 1264)
+            is_true(big_screen > small_screen, "bigger screen should yield bigger sticker")
+        end)
+    end)
+
+    -- ─── Serialization with rotation ───
+
+    describe("serialize / deserialize with rotation", function()
+        it("should round-trip rotation data", function()
+            local store = StickerStore:new()
+            store:addSticker(1, 10, 20, 50, 50, "/img/a.png", 90)
+            store:addSticker(1, 30, 40, 50, 50, "/img/b.png", 270)
+
+            local data = store:serialize()
+            local store2 = StickerStore:new()
+            store2:deserialize(data)
+
+            local s = store2:getStickersForPage(1)
+            eq(90, s[1].rotation)
+            eq(270, s[2].rotation)
+        end)
     end)
 
     -- ─── Removing / undo ───

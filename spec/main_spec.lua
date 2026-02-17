@@ -54,10 +54,14 @@ describe("PageSticker (main.lua)", function()
             eq(0, count, "sticker_cache should start empty")
         end)
 
-        it("should compute sticker_size from screen width", function()
+        it("should default size preset to medium", function()
             local plugin = make_plugin()
-            -- Screen width is 1264, so 12% = 151
-            eq(math.floor(1264 * 0.12), plugin.sticker_size)
+            eq("medium", plugin.current_size_preset)
+        end)
+
+        it("should default rotation to 0", function()
+            local plugin = make_plugin()
+            eq(0, plugin.current_rotation)
         end)
 
         it("should register dispatcher actions", function()
@@ -136,21 +140,50 @@ describe("PageSticker (main.lua)", function()
     end)
 
     describe("placeSticker", function()
-        it("should add sticker centered on tap coordinates", function()
+        it("should add sticker centered on tap coordinates using current preset", function()
             local plugin = make_plugin()
             plugin.current_page = 1
             plugin.selected_sticker = "/img/star.png"
-            plugin.sticker_size = 100
+            plugin.current_size_preset = "medium"
 
             plugin:placeSticker(500, 600)
 
+            local size = plugin:getCurrentStickerSize()
             local stickers = plugin.store:getStickersForPage(1)
             tbl_len(stickers, 1)
-            eq(450, stickers[1].x, "x should be tap_x - w/2")
-            eq(550, stickers[1].y, "y should be tap_y - h/2")
-            eq(100, stickers[1].w)
-            eq(100, stickers[1].h)
+            eq(500 - math.floor(size / 2), stickers[1].x, "x should be centered")
+            eq(600 - math.floor(size / 2), stickers[1].y, "y should be centered")
+            eq(size, stickers[1].w)
+            eq(size, stickers[1].h)
             eq("/img/star.png", stickers[1].img)
+        end)
+
+        it("should store the current rotation with the placed sticker", function()
+            local plugin = make_plugin()
+            plugin.current_page = 1
+            plugin.selected_sticker = "/img/star.png"
+            plugin.current_rotation = 90
+
+            plugin:placeSticker(100, 200)
+
+            local stickers = plugin.store:getStickersForPage(1)
+            eq(90, stickers[1].rotation, "should save rotation=90")
+        end)
+
+        it("should use different sizes for different presets", function()
+            local plugin = make_plugin()
+            plugin.current_page = 1
+            plugin.selected_sticker = "/img/star.png"
+
+            plugin.current_size_preset = "small"
+            plugin:placeSticker(100, 100)
+            local small_w = plugin.store:getStickersForPage(1)[1].w
+
+            plugin.current_size_preset = "large"
+            plugin:placeSticker(200, 200)
+            local large_w = plugin.store:getStickersForPage(1)[2].w
+
+            is_true(large_w > small_w, "large preset should be bigger than small")
         end)
 
         it("should not place when no page is set", function()
@@ -171,7 +204,6 @@ describe("PageSticker (main.lua)", function()
             local plugin = make_plugin()
             plugin.current_page = 1
             plugin.selected_sticker = "/img/star.png"
-            plugin.sticker_size = 50
             mocks.reset()
 
             plugin:placeSticker(100, 200)
@@ -319,14 +351,15 @@ describe("PageSticker (main.lua)", function()
     end)
 
     describe("addToMainMenu", function()
-        it("should add menu entries", function()
+        it("should add menu entries with size and rotation sub-menus", function()
             local plugin = make_plugin()
             local menu_items = {}
             plugin:addToMainMenu(menu_items)
 
             is_not_nil(menu_items.sticker, "should add 'sticker' menu item")
             is_not_nil(menu_items.sticker.sub_item_table, "should have sub-items")
-            is_true(#menu_items.sticker.sub_item_table >= 4, "should have at least 4 sub-items")
+            -- Place, Size, Rotation, Show, Undo, Clear page, Clear all = 7
+            is_true(#menu_items.sticker.sub_item_table >= 7, "should have at least 7 sub-items")
         end)
 
         it("undo callback should remove last sticker from store", function()
@@ -338,8 +371,8 @@ describe("PageSticker (main.lua)", function()
             local menu_items = {}
             plugin:addToMainMenu(menu_items)
 
-            -- Find the undo item (3rd sub-item)
-            local undo_item = menu_items.sticker.sub_item_table[3]
+            -- Find the undo item (5th sub-item: Place, Size, Rotation, Show, Undo)
+            local undo_item = menu_items.sticker.sub_item_table[5]
             undo_item.callback()
 
             eq(1, plugin.store:getCountForPage(1), "should have 1 sticker after undo")
@@ -354,11 +387,111 @@ describe("PageSticker (main.lua)", function()
             local menu_items = {}
             plugin:addToMainMenu(menu_items)
 
-            -- Clear page is the 4th sub-item
-            local clear_item = menu_items.sticker.sub_item_table[4]
+            -- Clear page is the 6th sub-item
+            local clear_item = menu_items.sticker.sub_item_table[6]
             clear_item.callback()
 
             eq(0, plugin.store:getCountForPage(1))
+        end)
+    end)
+
+    describe("settings round-trip (size and rotation)", function()
+        it("should save and restore size preset", function()
+            local plugin, ui = make_plugin()
+            plugin.current_size_preset = "large"
+            plugin:onSaveSettings()
+
+            local plugin2 = make_plugin()
+            plugin2:onReadSettings(ui.doc_settings)
+            eq("large", plugin2.current_size_preset)
+        end)
+
+        it("should save and restore rotation", function()
+            local plugin, ui = make_plugin()
+            plugin.current_rotation = 180
+            plugin:onSaveSettings()
+
+            local plugin2 = make_plugin()
+            plugin2:onReadSettings(ui.doc_settings)
+            eq(180, plugin2.current_rotation)
+        end)
+
+        it("should default size to medium when not saved", function()
+            local plugin = make_plugin()
+            plugin:onReadSettings(mocks.new_doc_settings())
+            eq("medium", plugin.current_size_preset)
+        end)
+
+        it("should default rotation to 0 when not saved", function()
+            local plugin = make_plugin()
+            plugin:onReadSettings(mocks.new_doc_settings())
+            eq(0, plugin.current_rotation)
+        end)
+    end)
+
+    describe("getCurrentStickerSize", function()
+        it("should return pixel size based on preset and screen width", function()
+            local plugin = make_plugin()
+            plugin.current_size_preset = "small"
+            local small = plugin:getCurrentStickerSize()
+            plugin.current_size_preset = "xlarge"
+            local xlarge = plugin:getCurrentStickerSize()
+
+            is_true(small > 0)
+            is_true(xlarge > small, "xlarge should be bigger than small")
+        end)
+
+        it("should fall back to medium for invalid preset", function()
+            local plugin = make_plugin()
+            plugin.current_size_preset = "nonexistent"
+            local size = plugin:getCurrentStickerSize()
+            local expected = math.floor(1264 * 0.12)  -- medium on 1264px screen
+            eq(expected, size)
+        end)
+    end)
+
+    describe("buildSizeMenuItems", function()
+        it("should return 4 size presets", function()
+            local plugin = make_plugin()
+            local items = plugin:buildSizeMenuItems()
+            tbl_len(items, 4)
+        end)
+
+        it("should check the current preset", function()
+            local plugin = make_plugin()
+            plugin.current_size_preset = "large"
+            local items = plugin:buildSizeMenuItems()
+
+            -- Find the one that's checked
+            local checked_count = 0
+            for _, item in ipairs(items) do
+                if item.checked_func() then
+                    checked_count = checked_count + 1
+                end
+            end
+            eq(1, checked_count, "exactly one preset should be checked")
+        end)
+    end)
+
+    describe("buildRotationMenuItems", function()
+        it("should return 4 rotation options", function()
+            local plugin = make_plugin()
+            local items = plugin:buildRotationMenuItems()
+            tbl_len(items, 4)
+        end)
+
+        it("should check the current rotation", function()
+            local plugin = make_plugin()
+            plugin.current_rotation = 270
+            local items = plugin:buildRotationMenuItems()
+
+            local checked_count = 0
+            for _, item in ipairs(items) do
+                if item.checked_func() then
+                    checked_count = checked_count + 1
+                end
+            end
+            eq(1, checked_count, "exactly one rotation should be checked")
         end)
     end)
 
